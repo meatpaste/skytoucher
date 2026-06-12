@@ -312,8 +312,8 @@ canvas {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: min(520px, calc(100vw - 650px));
-  min-width: 330px;
+  width: min(520px, calc(100vw - 760px));
+  min-width: 280px;
   min-height: 46px;
   padding: 6px;
   border: 1px solid rgba(245, 250, 255, 0.46);
@@ -342,7 +342,8 @@ canvas {
 
 .share-panel button,
 .input-panel button,
-.rate-panel button {
+.rate-panel button,
+.physics-panel button {
   flex: 0 0 70px;
   width: 70px;
   height: 34px;
@@ -357,21 +358,24 @@ canvas {
 
 .share-panel button:hover,
 .input-panel button:hover,
-.rate-panel button:hover {
+.rate-panel button:hover,
+.physics-panel button:hover {
   background: rgba(245, 250, 255, 0.14);
   border-color: rgba(245, 250, 255, 0.84);
 }
 
 .share-panel button:disabled,
 .input-panel button:disabled,
-.rate-panel button:disabled {
+.rate-panel button:disabled,
+.physics-panel button:disabled {
   cursor: default;
   opacity: 0.45;
 }
 
 .share-panel button:active,
 .input-panel button:active,
-.rate-panel button:active {
+.rate-panel button:active,
+.physics-panel button:active {
   transform: translateY(1px);
 }
 
@@ -403,7 +407,8 @@ canvas {
 }
 
 .input-panel.is-hidden,
-.rate-panel.is-hidden {
+.rate-panel.is-hidden,
+.physics-panel.is-hidden {
   display: none;
 }
 
@@ -417,6 +422,21 @@ canvas {
   padding: 8px;
   border: 1px solid rgba(245, 250, 255, 0.5);
   background: rgba(12, 16, 20, 0.96);
+  box-shadow: var(--osd-shadow);
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.physics-panel {
+  position: absolute;
+  top: 92px;
+  right: 16px;
+  z-index: 4;
+  width: min(390px, calc(100vw - 32px));
+  max-height: calc(100vh - 184px);
+  padding: 8px;
+  border: 1px solid rgba(245, 250, 255, 0.5);
+  background: rgba(0, 0, 0, 0.9);
   box-shadow: var(--osd-shadow);
   overflow: hidden;
   pointer-events: auto;
@@ -438,8 +458,17 @@ canvas {
   margin-bottom: 8px;
 }
 
+.physics-panel-header {
+  display: grid;
+  grid-template-columns: 1fr 72px;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
 .input-panel-title,
-.rate-panel-title {
+.rate-panel-title,
+.physics-panel-title {
   min-width: 68px;
   color: var(--hud-ink);
   font: 800 13px/34px "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
@@ -461,9 +490,53 @@ canvas {
 }
 
 .input-panel button,
-.rate-panel button {
+.rate-panel button,
+.physics-panel button {
   width: auto;
   flex-basis: auto;
+}
+
+.physics-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1px;
+  max-height: calc(100vh - 244px);
+  overflow: auto;
+  scrollbar-color: rgba(245, 250, 255, 0.4) rgba(0, 0, 0, 0.32);
+}
+
+.physics-row {
+  display: grid;
+  grid-template-columns: minmax(112px, 0.8fr) minmax(0, 1.2fr);
+  gap: 1px;
+  min-height: 30px;
+}
+
+.physics-cell {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(245, 250, 255, 0.16);
+  background: rgba(245, 250, 255, 0.045);
+  color: var(--hud-ink);
+  font: 800 11px/1.45 "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  text-shadow: var(--osd-shadow);
+  overflow-wrap: anywhere;
+}
+
+.physics-cell:first-child {
+  color: var(--hud-muted);
+}
+
+.physics-cell.is-good {
+  color: var(--green);
+}
+
+.physics-cell.is-warning {
+  color: var(--amber);
+}
+
+.physics-cell.is-danger {
+  color: var(--red);
 }
 
 .rate-content {
@@ -998,6 +1071,14 @@ canvas {
     max-height: min(58vh, 520px);
   }
 
+  .physics-panel {
+    top: 74px;
+    left: 14px;
+    right: 14px;
+    width: auto;
+    max-height: calc(100vh - 204px);
+  }
+
   .input-panel-header {
     grid-template-columns: 1fr 72px;
   }
@@ -1020,7 +1101,8 @@ canvas {
   }
 
   .input-panel button,
-  .rate-panel button {
+  .rate-panel button,
+  .physics-panel button {
     height: 32px;
     font-size: 11px;
   }
@@ -1068,6 +1150,19 @@ canvas {
   }
 
   .rate-summary {
+    font-size: 10px;
+  }
+
+  .physics-grid {
+    max-height: calc(100vh - 264px);
+  }
+
+  .physics-row {
+    grid-template-columns: minmax(82px, 0.75fr) minmax(0, 1.25fr);
+  }
+
+  .physics-cell {
+    padding: 5px 6px;
     font-size: 10px;
   }
 

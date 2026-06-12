@@ -2,7 +2,7 @@
 
 Browser-based Three.js FPV simulator with local-network multiplayer.
 
-The flight model is currently set up as a BetaFPV Air65 Freestyle with a LAVA 1S 300mAh 75C battery. The physics uses the published 17.3g dry weight, 65mm wheelbase, 0702SE II 23000KV motors, 32g max static thrust per motor, HQ 31mm props, and the 8.3g/300mAh LiHV pack as the baseline.
+The flight model is currently set up as a BetaFPV Air65 Freestyle with a LAVA 1S 300mAh 75C battery. The physics uses the published 17.3g dry weight, 65mm wheelbase, 0702SE II 23000KV motors, HQ 31mm props, and the 8.3g/300mAh LiHV pack as the baseline. Motor thrust and current are interpolated from the BETAFPV 0702SE II 23000KV 31mm prop 4V load table, including the 32g / 4.19A full-throttle endpoint.
 
 Run from the repository root:
 
@@ -48,6 +48,17 @@ Controls:
 - `M`: acro / level mode. Acro is the default and does not self-level.
 - `B`: brake
 - `PARK` / `FIELD` button: switch between the airfield and fairground maps
+
+Physics audit:
+
+- Click `PHYS` in the bottom OSD bar.
+- The panel shows Air65 mass/geometry, hover throttle, thrust-to-weight, interpolated motor output/current, pack sag, estimated time remaining, acceleration, and angular rates.
+- Console diagnostics are available:
+
+```js
+window.fpvSim.getPhysicsAudit();
+window.fpvSim.getMotorSweep(4.0);
+```
 
 Rates panel:
 

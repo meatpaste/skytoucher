@@ -17,6 +17,7 @@ const resetButton = document.querySelector("#resetButton");
 const levelButton = document.querySelector("#levelButton");
 const mapButton = document.querySelector("#mapButton");
 const ratesButton = document.querySelector("#ratesButton");
+const physicsButton = document.querySelector("#physicsButton");
 const inputButton = document.querySelector("#inputButton");
 const shareUrlInput = document.querySelector("#shareUrl");
 const shareCopyButton = document.querySelector("#shareCopyButton");
@@ -34,6 +35,9 @@ const rateSummary = document.querySelector("#rateSummary");
 const rateProfileName = document.querySelector("#rateProfileName");
 const rateDefaultButton = document.querySelector("#rateDefaultButton");
 const rateCloseButton = document.querySelector("#rateCloseButton");
+const physicsPanel = document.querySelector("#physicsPanel");
+const physicsRows = document.querySelector("#physicsRows");
+const physicsCloseButton = document.querySelector("#physicsCloseButton");
 
 const DEG = Math.PI / 180;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -177,6 +181,8 @@ let inputPanelOpen = false;
 let inputPanelSignature = "";
 let ratePanelOpen = false;
 let ratePanelSignature = "";
+let physicsPanelOpen = false;
+let physicsPanelLastUpdate = 0;
 let keyCapture = null;
 
 const renderer = new THREE.WebGLRenderer({
@@ -249,6 +255,15 @@ mapButton.addEventListener("click", () => {
 
 ratesButton.addEventListener("click", () => {
   setRatePanelOpen(!ratePanelOpen);
+});
+
+physicsButton.addEventListener("click", () => {
+  setPhysicsPanelOpen(!physicsPanelOpen);
+});
+
+physicsCloseButton.addEventListener("click", () => {
+  setPhysicsPanelOpen(false);
+  canvas.focus();
 });
 
 rateCloseButton.addEventListener("click", () => {
@@ -420,6 +435,12 @@ window.fpvSim = {
   getRateSetpoint(axis, stick) {
     return getRateDegreesPerSecond(axis, stick);
   },
+  getPhysicsAudit() {
+    return getPhysicsAudit();
+  },
+  getMotorSweep(voltage = AIRCRAFT.battery.nominalVoltage) {
+    return getMotorSweep(voltage);
+  },
   getGamepads() {
     return controls.getGamepads();
   },
@@ -437,8 +458,13 @@ window.fpvSim = {
       angularVelocity: flight.angularVelocity.toArray(),
       thrustN: flight.thrustN,
       batteryVoltage: flight.batteryVoltage,
+      batteryOpenCircuitVoltage: flight.batteryOpenCircuitVoltage,
+      batterySag: flight.batterySag,
       batterySoc: flight.batterySoc,
       currentA: flight.currentA,
+      motorDrives: [...flight.motorDrives],
+      motorCurrents: [...flight.motorCurrents],
+      motorThrusts: [...flight.motorThrusts],
       model: AIRCRAFT.name,
       battery: AIRCRAFT.battery.name,
       rateProfile: activeRateProfileIndex + 1,
@@ -471,6 +497,7 @@ function loop(now) {
   updateHud();
   updateInputPanel(false);
   updateRatePanel(false);
+  updatePhysicsPanel(now);
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
@@ -498,8 +525,25 @@ function createAir65FreestyleConfig() {
   const massKg = dryMassKg + batteryMassKg;
   const wheelbaseM = 0.065;
   const armOffsetM = wheelbaseM / (2 * Math.SQRT2);
-  const maxStaticThrustPerMotorN = gramForceToNewtons(32);
-  const hoverThrottle = Math.sqrt((massKg * GRAVITY) / (4 * maxStaticThrustPerMotorN));
+  const motorCurve = create0702SeIi23000KvMotorCurve();
+  const maxStaticThrustPerMotorN = motorCurve.maxThrustN;
+  const battery = {
+    name: "LAVA 1S 300mAh 75C",
+    massKg: batteryMassKg,
+    capacityAh: 0.3,
+    fullVoltage: 4.35,
+    nominalVoltage: 3.8,
+    emptyVoltage: 3.3,
+    cutoffVoltage: 3.15,
+    baseResistanceOhm: 0.044,
+    electronicsCurrentA: 0.24,
+    standbyCurrentA: 0.08
+  };
+  const hoverThrottle = getMotorDriveForThrustAtVoltage(
+    (massKg * GRAVITY) / 4,
+    battery.nominalVoltage,
+    motorCurve
+  );
 
   return {
     name: "BetaFPV Air65 Freestyle",
@@ -510,9 +554,10 @@ function createAir65FreestyleConfig() {
     armOffsetM,
     propDiameterM: 0.031,
     motorKv: 23000,
+    motorCurve,
     maxStaticThrustPerMotorN,
     hoverThrottle,
-    defaultThrottle: Math.min(0.5, hoverThrottle + 0.015),
+    defaultThrottle: Math.min(0.48, hoverThrottle + 0.018),
     motorIdle: 0.065,
     motorTimeConstant: 0.026,
     yawTorquePerNewton: 0.0034,
@@ -558,20 +603,7 @@ function createAir65FreestyleConfig() {
       y: 1.4e-5,
       z: 2.1e-5
     },
-    battery: {
-      name: "LAVA 1S 300mAh 75C",
-      massKg: batteryMassKg,
-      capacityAh: 0.3,
-      fullVoltage: 4.35,
-      nominalVoltage: 3.8,
-      emptyVoltage: 3.3,
-      cutoffVoltage: 3.15,
-      resistanceOhm: 0.052,
-      electronicsCurrentA: 0.24,
-      standbyCurrentA: 0.08,
-      maxMotorCurrentA: 3.2,
-      motorCurrentExponent: 2.25
-    },
+    battery,
     motors: [
       { x: -armOffsetM, z: -armOffsetM, yawSign: 1 },
       { x: armOffsetM, z: -armOffsetM, yawSign: -1 },
@@ -583,6 +615,97 @@ function createAir65FreestyleConfig() {
 
 function gramForceToNewtons(grams) {
   return grams * 0.001 * GRAVITY;
+}
+
+function newtonsToGramForce(newtons) {
+  return newtons / GRAVITY * 1000;
+}
+
+function create0702SeIi23000KvMotorCurve() {
+  const points = [
+    [0, 0, 0],
+    [0.1, 0.55, 0.15],
+    [0.2, 2.7, 0.57],
+    [0.3, 5.48, 1.01],
+    [0.4, 8.93, 1.42],
+    [0.5, 12.3, 1.83],
+    [0.6, 16.08, 2.3],
+    [0.7, 20.56, 2.67],
+    [0.8, 24.5, 3.12],
+    [0.9, 27.5, 3.49],
+    [1, 32, 4.19]
+  ].map(([drive, thrustG, currentA]) => ({
+    drive,
+    thrustN: gramForceToNewtons(thrustG),
+    thrustG,
+    currentA
+  }));
+
+  return {
+    name: "BETAFPV 0702SE II 23000KV",
+    source: "BETAFPV 0702SE II 23000KV 31mm prop 4V load table",
+    referenceVoltage: 4,
+    points,
+    maxThrustN: points[points.length - 1].thrustN,
+    maxCurrentA: points[points.length - 1].currentA
+  };
+}
+
+function sampleMotorAtDrive(drive, voltage, curve = AIRCRAFT.motorCurve) {
+  const base = interpolateMotorCurveByDrive(curve, drive);
+  const voltageScale = getMotorVoltageScale(voltage, curve);
+  const thrustN = base.thrustN * voltageScale ** 2;
+  const currentA = base.currentA * voltageScale ** 2;
+  return {
+    drive: THREE.MathUtils.clamp(drive, 0, 1),
+    thrustN,
+    thrustG: newtonsToGramForce(thrustN),
+    currentA
+  };
+}
+
+function getMotorDriveForThrustAtVoltage(thrustN, voltage, curve = AIRCRAFT.motorCurve) {
+  const voltageScale = getMotorVoltageScale(voltage, curve);
+  const referenceThrustN = Math.max(0, thrustN) / Math.max(0.01, voltageScale ** 2);
+  const points = curve.points;
+  if (referenceThrustN <= points[0].thrustN) return points[0].drive;
+  for (let i = 1; i < points.length; i += 1) {
+    const previous = points[i - 1];
+    const next = points[i];
+    if (referenceThrustN <= next.thrustN) {
+      const t = (referenceThrustN - previous.thrustN) / Math.max(1e-6, next.thrustN - previous.thrustN);
+      return THREE.MathUtils.lerp(previous.drive, next.drive, t);
+    }
+  }
+  return points[points.length - 1].drive;
+}
+
+function interpolateMotorCurveByDrive(curve, drive) {
+  const clampedDrive = THREE.MathUtils.clamp(Number(drive) || 0, 0, 1);
+  const points = curve.points;
+  if (clampedDrive <= points[0].drive) return points[0];
+  for (let i = 1; i < points.length; i += 1) {
+    const previous = points[i - 1];
+    const next = points[i];
+    if (clampedDrive <= next.drive) {
+      const t = (clampedDrive - previous.drive) / Math.max(1e-6, next.drive - previous.drive);
+      return {
+        drive: clampedDrive,
+        thrustN: THREE.MathUtils.lerp(previous.thrustN, next.thrustN, t),
+        thrustG: THREE.MathUtils.lerp(previous.thrustG, next.thrustG, t),
+        currentA: THREE.MathUtils.lerp(previous.currentA, next.currentA, t)
+      };
+    }
+  }
+  return points[points.length - 1];
+}
+
+function getMotorVoltageScale(voltage, curve = AIRCRAFT.motorCurve) {
+  return THREE.MathUtils.clamp(
+    (Number(voltage) || curve.referenceVoltage) / curve.referenceVoltage,
+    0.74,
+    1.1
+  );
 }
 
 function createDefaultRateProfiles(aircraft) {
@@ -821,8 +944,13 @@ function createFlightState() {
     motorDrives: [AIRCRAFT.motorIdle, AIRCRAFT.motorIdle, AIRCRAFT.motorIdle, AIRCRAFT.motorIdle],
     motorTargets: [AIRCRAFT.motorIdle, AIRCRAFT.motorIdle, AIRCRAFT.motorIdle, AIRCRAFT.motorIdle],
     motorThrusts: [0, 0, 0, 0],
+    motorCurrents: [0, 0, 0, 0],
+    acceleration: new THREE.Vector3(),
     batterySoc: 1,
     batteryVoltage: AIRCRAFT.battery.fullVoltage,
+    batteryOpenCircuitVoltage: AIRCRAFT.battery.fullVoltage,
+    batterySag: 0,
+    batteryResistanceOhm: AIRCRAFT.battery.baseResistanceOhm,
     currentA: 0,
     thrustN: 0
   };
@@ -845,8 +973,13 @@ function resetFlight() {
   flight.motorDrives.fill(AIRCRAFT.motorIdle);
   flight.motorTargets.fill(AIRCRAFT.motorIdle);
   flight.motorThrusts.fill(0);
+  flight.motorCurrents.fill(0);
+  flight.acceleration.set(0, 0, 0);
   flight.batterySoc = 1;
   flight.batteryVoltage = AIRCRAFT.battery.fullVoltage;
+  flight.batteryOpenCircuitVoltage = AIRCRAFT.battery.fullVoltage;
+  flight.batterySag = 0;
+  flight.batteryResistanceOhm = AIRCRAFT.battery.baseResistanceOhm;
   flight.currentA = 0;
   flight.thrustN = 0;
   composeAttitude(flight);
@@ -908,6 +1041,7 @@ function updateFlight(dt) {
   addAerodynamicDrag(force);
 
   const acceleration = force.multiplyScalar(1 / AIRCRAFT.massKg);
+  flight.acceleration.copy(acceleration);
   flight.velocity.addScaledVector(acceleration, dt);
   flight.velocity.clampLength(0, 44);
   flight.position.addScaledVector(flight.velocity, dt);
@@ -1004,8 +1138,8 @@ function calculateControlTorques(rateTargets, output, dt) {
 
 function updateMotors(requestedTorques, dt) {
   const maxThrustPerMotor = getVoltageScaledMaxThrust();
-  const collective = flight.armed ? flight.throttle ** 2 * maxThrustPerMotor * 4 : 0;
-  const baseThrust = collective / 4;
+  const baseDrive = flight.armed ? THREE.MathUtils.clamp(flight.throttle, AIRCRAFT.motorIdle, 1) : 0;
+  const baseThrust = sampleMotorAtDrive(baseDrive, flight.batteryVoltage).thrustN;
   const pitchDelta = requestedTorques.x / (4 * AIRCRAFT.armOffsetM);
   const rollDelta = requestedTorques.z / (4 * AIRCRAFT.armOffsetM);
   const yawDelta = requestedTorques.y / (4 * AIRCRAFT.yawTorquePerNewton);
@@ -1020,27 +1154,34 @@ function updateMotors(requestedTorques, dt) {
 
     const idle = flight.armed ? AIRCRAFT.motorIdle : 0;
     const targetDrive = maxThrustPerMotor > 0
-      ? THREE.MathUtils.clamp(Math.sqrt(targetThrust / maxThrustPerMotor), idle, 1)
+      ? THREE.MathUtils.clamp(getMotorDriveForThrustAtVoltage(targetThrust, flight.batteryVoltage), idle, 1)
       : 0;
 
     flight.motorTargets[index] = targetDrive;
     flight.motorDrives[index] = THREE.MathUtils.lerp(flight.motorDrives[index], targetDrive, motorLerp);
-    flight.motorThrusts[index] = flight.motorDrives[index] ** 2 * maxThrustPerMotor;
+    const sample = sampleMotorAtDrive(flight.motorDrives[index], flight.batteryVoltage);
+    flight.motorThrusts[index] = sample.thrustN;
+    flight.motorCurrents[index] = sample.currentA;
   });
 }
 
 function updateBattery(dt) {
   const battery = AIRCRAFT.battery;
   let currentA = flight.armed ? battery.electronicsCurrentA : battery.standbyCurrentA;
-  flight.motorDrives.forEach((drive) => {
-    currentA += battery.maxMotorCurrentA * drive ** battery.motorCurrentExponent;
+  flight.motorCurrents.forEach((current) => {
+    currentA += current;
   });
 
   flight.currentA = currentA;
   flight.batterySoc = Math.max(0, flight.batterySoc - (currentA * dt) / (battery.capacityAh * 3600));
 
   const unloadedVoltage = estimateOpenCircuitVoltage(flight.batterySoc);
-  const loadVoltage = Math.max(battery.cutoffVoltage, unloadedVoltage - currentA * battery.resistanceOhm);
+  const resistance = estimateBatteryResistance(flight.batterySoc, currentA);
+  const sag = currentA * resistance;
+  const loadVoltage = Math.max(battery.cutoffVoltage, unloadedVoltage - sag);
+  flight.batteryOpenCircuitVoltage = unloadedVoltage;
+  flight.batteryResistanceOhm = resistance;
+  flight.batterySag = Math.max(0, unloadedVoltage - loadVoltage);
   flight.batteryVoltage = THREE.MathUtils.lerp(flight.batteryVoltage, loadVoltage, 1 - Math.exp(-dt * 10));
 }
 
@@ -1064,6 +1205,13 @@ function estimateOpenCircuitVoltage(soc) {
     }
   }
   return battery.fullVoltage;
+}
+
+function estimateBatteryResistance(soc, currentA) {
+  const base = AIRCRAFT.battery.baseResistanceOhm;
+  const lowChargeRise = (1 - clamp01(soc)) * 0.72;
+  const highLoadRise = Math.max(0, currentA - 8) * 0.012;
+  return base * (1 + lowChargeRise + highLoadRise);
 }
 
 function calculateMotorTorques(output, groundEffect) {
@@ -1107,17 +1255,12 @@ function integrateAttitude(dt) {
 }
 
 function getVoltageScaledMaxThrust() {
-  const voltageScale = THREE.MathUtils.clamp(
-    flight.batteryVoltage / AIRCRAFT.battery.fullVoltage,
-    0.68,
-    1.02
-  );
-  return AIRCRAFT.maxStaticThrustPerMotorN * voltageScale ** 2;
+  return sampleMotorAtDrive(1, flight.batteryVoltage).thrustN;
 }
 
 function getHoverThrottle() {
-  const maxTotalThrust = getVoltageScaledMaxThrust() * 4;
-  return Math.sqrt((AIRCRAFT.massKg * GRAVITY) / Math.max(0.001, maxTotalThrust));
+  const perMotorHoverThrust = (AIRCRAFT.massKg * GRAVITY) / 4;
+  return getMotorDriveForThrustAtVoltage(perMotorHoverThrust, flight.batteryVoltage);
 }
 
 function getGroundEffectMultiplier() {
@@ -1217,11 +1360,149 @@ function signedDegrees(radians) {
   return `${degrees >= 0 ? "+" : ""}${degrees}`;
 }
 
+function getPhysicsAudit() {
+  const altitudeM = Math.max(0, flight.position.y - GROUND_HEIGHT);
+  const speed = flight.velocity.length();
+  const usedMah = (1 - flight.batterySoc) * AIRCRAFT.battery.capacityAh * 1000;
+  const maxThrustN = getVoltageScaledMaxThrust() * 4;
+  const thrustToWeight = maxThrustN / Math.max(0.001, AIRCRAFT.massKg * GRAVITY);
+  const avgMotorDrive = average(flight.motorDrives);
+  const maxMotorDrive = Math.max(...flight.motorDrives);
+  const avgMotorCurrent = average(flight.motorCurrents);
+  const maxMotorCurrent = Math.max(...flight.motorCurrents);
+  const hoverThrottle = getHoverThrottle();
+  const currentFlightTimeMin = flight.currentA > 0.05
+    ? ((AIRCRAFT.battery.capacityAh * flight.batterySoc) / flight.currentA) * 60
+    : Infinity;
+
+  return {
+    model: AIRCRAFT.name,
+    motor: AIRCRAFT.motorCurve.name,
+    motorSource: AIRCRAFT.motorCurve.source,
+    battery: AIRCRAFT.battery.name,
+    dryMassG: AIRCRAFT.dryMassKg * 1000,
+    batteryMassG: AIRCRAFT.battery.massKg * 1000,
+    allUpMassG: AIRCRAFT.massKg * 1000,
+    wheelbaseMm: AIRCRAFT.wheelbaseM * 1000,
+    propMm: AIRCRAFT.propDiameterM * 1000,
+    altitudeM,
+    speedMS: speed,
+    accelerationMS2: flight.acceleration.length(),
+    verticalAccelerationMS2: flight.acceleration.y,
+    throttle: flight.throttle,
+    hoverThrottle,
+    thrustN: flight.thrustN,
+    thrustG: newtonsToGramForce(flight.thrustN),
+    maxThrustG: newtonsToGramForce(maxThrustN),
+    thrustToWeight,
+    currentA: flight.currentA,
+    avgMotorDrive,
+    maxMotorDrive,
+    avgMotorCurrent,
+    maxMotorCurrent,
+    batteryVoltage: flight.batteryVoltage,
+    batteryOpenCircuitVoltage: flight.batteryOpenCircuitVoltage,
+    batterySag: flight.batterySag,
+    batteryResistanceOhm: flight.batteryResistanceOhm,
+    batterySoc: flight.batterySoc,
+    usedMah,
+    estimatedRemainingMin: currentFlightTimeMin,
+    ratesDps: {
+      pitch: flight.angularVelocity.x / DEG,
+      yaw: flight.angularVelocity.y / DEG,
+      roll: flight.angularVelocity.z / DEG
+    },
+    inertia: { ...AIRCRAFT.inertia }
+  };
+}
+
+function getMotorSweep(voltage = AIRCRAFT.battery.nominalVoltage) {
+  const cleanVoltage = sanitizeNumber(voltage, AIRCRAFT.battery.nominalVoltage, AIRCRAFT.battery.cutoffVoltage, AIRCRAFT.battery.fullVoltage);
+  return AIRCRAFT.motorCurve.points.map((point) => {
+    const sample = sampleMotorAtDrive(point.drive, cleanVoltage);
+    return {
+      drive: point.drive,
+      voltage: cleanVoltage,
+      thrustG: sample.thrustG,
+      currentA: sample.currentA
+    };
+  });
+}
+
+function updatePhysicsPanel(now = performance.now(), force = false) {
+  if (!physicsPanelOpen) return;
+  if (!force && now - physicsPanelLastUpdate < 120) return;
+  physicsPanelLastUpdate = now;
+
+  const audit = getPhysicsAudit();
+  physicsRows.replaceChildren(
+    createPhysicsRow("MODEL", audit.model),
+    createPhysicsRow("MOTOR", audit.motor),
+    createPhysicsRow("SOURCE", audit.motorSource),
+    createPhysicsRow("MASS", `${formatFixed(audit.allUpMassG, 1)}G AUW (${formatFixed(audit.dryMassG, 1)}G + ${formatFixed(audit.batteryMassG, 1)}G)`),
+    createPhysicsRow("GEOMETRY", `${formatFixed(audit.wheelbaseMm, 0)}MM WB / ${formatFixed(audit.propMm, 0)}MM PROP`),
+    createPhysicsRow("THROTTLE", `${formatPercent(audit.throttle)} CMD / ${formatPercent(audit.hoverThrottle)} HOVER`, getHoverClass(audit)),
+    createPhysicsRow("THRUST", `${formatFixed(audit.thrustG, 1)}G NOW / ${formatFixed(audit.maxThrustG, 0)}G MAX`, audit.thrustToWeight < 3.5 ? "is-warning" : "is-good"),
+    createPhysicsRow("T/W", `${formatFixed(audit.thrustToWeight, 2)}:1`, audit.thrustToWeight < 3.5 ? "is-warning" : "is-good"),
+    createPhysicsRow("MOTOR OUT", `${formatPercent(audit.avgMotorDrive)} AVG / ${formatPercent(audit.maxMotorDrive)} MAX`),
+    createPhysicsRow("MOTOR A", `${formatFixed(audit.avgMotorCurrent, 2)} AVG / ${formatFixed(audit.maxMotorCurrent, 2)} MAX`),
+    createPhysicsRow("PACK A", `${formatFixed(audit.currentA, 2)}A`, audit.currentA > 16 ? "is-warning" : ""),
+    createPhysicsRow("PACK V", `${formatFixed(audit.batteryVoltage, 2)}V LOAD / ${formatFixed(audit.batteryOpenCircuitVoltage, 2)}V OCV`, audit.batteryVoltage <= AIRCRAFT.battery.emptyVoltage ? "is-danger" : ""),
+    createPhysicsRow("SAG", `${formatFixed(audit.batterySag, 2)}V @ ${Math.round(audit.batteryResistanceOhm * 1000)}MOHM`, audit.batterySag > 0.7 ? "is-warning" : ""),
+    createPhysicsRow("CAPACITY", `${Math.round(audit.usedMah)}MAH USED / ${formatPercent(audit.batterySoc)} SOC`),
+    createPhysicsRow("TIME LEFT", Number.isFinite(audit.estimatedRemainingMin) ? `${formatFixed(audit.estimatedRemainingMin, 1)}MIN AT CURRENT A` : "--"),
+    createPhysicsRow("SPEED", `${formatFixed(audit.speedMS, 1)}M/S @ ${formatFixed(audit.altitudeM, 1)}M`),
+    createPhysicsRow("ACCEL", `${formatFixed(audit.verticalAccelerationMS2, 1)}M/S2 VERT / ${formatFixed(audit.accelerationMS2, 1)}M/S2 NET`),
+    createPhysicsRow("RATES", `R${formatSignedFixed(audit.ratesDps.roll, 0)} P${formatSignedFixed(audit.ratesDps.pitch, 0)} Y${formatSignedFixed(audit.ratesDps.yaw, 0)} DPS`)
+  );
+}
+
+function createPhysicsRow(labelText, valueText, valueClass = "") {
+  const row = document.createElement("div");
+  row.className = "physics-row";
+
+  const label = document.createElement("div");
+  label.className = "physics-cell";
+  label.textContent = labelText;
+
+  const value = document.createElement("div");
+  value.className = `physics-cell ${valueClass}`.trim();
+  value.textContent = valueText;
+
+  row.append(label, value);
+  return row;
+}
+
+function getHoverClass(audit) {
+  if (audit.throttle < audit.hoverThrottle * 0.75) return "is-warning";
+  if (audit.throttle > audit.hoverThrottle * 1.7) return "is-warning";
+  return "";
+}
+
+function formatPercent(value) {
+  return `${Math.round(THREE.MathUtils.clamp(value, 0, 1) * 100)}%`;
+}
+
+function formatFixed(value, precision) {
+  return Number(value).toFixed(precision);
+}
+
+function formatSignedFixed(value, precision) {
+  const fixed = Number(value).toFixed(precision);
+  return `${value >= 0 ? "+" : ""}${fixed}`;
+}
+
+function average(values) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
 function updateButtons() {
   armButton.textContent = flight.armed ? "DISARM" : "ARM";
   levelButton.textContent = levelMode ? "LEVEL" : "ACRO";
   mapButton.textContent = MAPS[MAPS[currentMapId].next].label;
   ratesButton.textContent = ratePanelOpen ? "RATES*" : "RATES";
+  physicsButton.textContent = physicsPanelOpen ? "PHYS*" : "PHYS";
   inputButton.textContent = inputPanelOpen ? "INPUT*" : "INPUT";
 }
 
@@ -1232,11 +1513,34 @@ function setRatePanelOpen(open) {
     inputPanel.classList.add("is-hidden");
     inputPanel.setAttribute("aria-hidden", "true");
   }
+  if (ratePanelOpen && physicsPanelOpen) {
+    physicsPanelOpen = false;
+    physicsPanel.classList.add("is-hidden");
+    physicsPanel.setAttribute("aria-hidden", "true");
+  }
   ratePanel.classList.toggle("is-hidden", !ratePanelOpen);
   ratePanel.setAttribute("aria-hidden", ratePanelOpen ? "false" : "true");
   ratePanelSignature = "";
   updateButtons();
   updateRatePanel(true);
+}
+
+function setPhysicsPanelOpen(open) {
+  physicsPanelOpen = Boolean(open);
+  if (physicsPanelOpen && inputPanelOpen) {
+    inputPanelOpen = false;
+    inputPanel.classList.add("is-hidden");
+    inputPanel.setAttribute("aria-hidden", "true");
+  }
+  if (physicsPanelOpen && ratePanelOpen) {
+    ratePanelOpen = false;
+    ratePanel.classList.add("is-hidden");
+    ratePanel.setAttribute("aria-hidden", "true");
+  }
+  physicsPanel.classList.toggle("is-hidden", !physicsPanelOpen);
+  physicsPanel.setAttribute("aria-hidden", physicsPanelOpen ? "false" : "true");
+  updateButtons();
+  updatePhysicsPanel(performance.now(), true);
 }
 
 function updateRatePanel(force = false) {
@@ -1429,6 +1733,11 @@ function setInputPanelOpen(open) {
     ratePanelOpen = false;
     ratePanel.classList.add("is-hidden");
     ratePanel.setAttribute("aria-hidden", "true");
+  }
+  if (inputPanelOpen && physicsPanelOpen) {
+    physicsPanelOpen = false;
+    physicsPanel.classList.add("is-hidden");
+    physicsPanel.setAttribute("aria-hidden", "true");
   }
   inputPanel.classList.toggle("is-hidden", !inputPanelOpen);
   inputPanel.setAttribute("aria-hidden", inputPanelOpen ? "false" : "true");
