@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FPV Simulator</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="./styles.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <main id="app" aria-label="FPV simulator">
+    <canvas id="viewport" aria-label="First person drone camera"></canvas>
+
+    <div class="hud" aria-hidden="false">
+      <section class="top-strip" aria-label="Flight telemetry">
+        <div class="readout">
+          <span>ALT</span>
+          <strong id="altitude">0.0 m</strong>
+        </div>
+        <div class="readout">
+          <span>SPD</span>
+          <strong id="speed">0.0 m/s</strong>
+        </div>
+        <div class="readout">
+          <span>THR</span>
+          <strong id="throttle">0%</strong>
+        </div>
+        <div class="readout">
+          <span>BAT</span>
+          <strong id="battery">4.35V</strong>
+        </div>
+        <div class="readout">
+          <span>ATT</span>
+          <strong id="attitude">0 / 0</strong>
+        </div>
+        <div class="readout">
+          <span>RIG</span>
+          <strong id="model">AIR65 FS</strong>
+        </div>
+        <div class="readout">
+          <span>SRC</span>
+          <strong id="source">KEYS</strong>
+        </div>
+        <div class="readout">
+          <span>NET</span>
+          <strong id="network">SOLO</strong>
+        </div>
+      </section>
+
+      <section class="share-panel" aria-label="Multiplayer share link">
+        <input id="shareUrl" type="text" value="LAN link unavailable" readonly aria-label="Share URL" />
+        <button id="shareCopyButton" type="button">COPY</button>
+      </section>
+
+      <section class="input-panel is-hidden" id="inputPanel" aria-label="Input mapping" aria-hidden="true">
+        <header class="input-panel-header">
+          <div class="input-panel-title">INPUT</div>
+          <select id="inputDeviceSelect" aria-label="Input device"></select>
+          <button id="inputDefaultButton" type="button">DEFAULT</button>
+          <button id="inputCloseButton" type="button">CLOSE</button>
+        </header>
+        <div class="input-table" id="inputRows"></div>
+      </section>
+
+      <section class="rate-panel is-hidden" id="ratePanel" aria-label="Rate profile" aria-hidden="true">
+        <header class="rate-panel-header">
+          <div class="rate-panel-title">RATES</div>
+          <select id="rateProfileSelect" aria-label="Rate profile"></select>
+          <select id="rateTypeSelect" aria-label="Rate type"></select>
+          <button id="rateDefaultButton" type="button">DEFAULT</button>
+          <button id="rateCloseButton" type="button">CLOSE</button>
+        </header>
+        <div class="rate-content">
+          <section class="rate-card" aria-label="Rateprofile settings">
+            <header class="rate-card-title">
+              <span>Rateprofile Settings</span>
+              <strong id="rateProfileName">PROFILE 1</strong>
+            </header>
+            <div class="rate-grid" id="rateRows"></div>
+          </section>
+          <section class="rate-card rate-preview-card" aria-label="Rate preview">
+            <header class="rate-card-title">
+              <span>Stick Response</span>
+              <strong>DEG/S</strong>
+            </header>
+            <svg id="rateCurve" class="rate-curve" viewBox="0 0 360 180" role="img" aria-label="Rate curve preview"></svg>
+            <div class="rate-summary" id="rateSummary"></div>
+          </section>
+        </div>
+      </section>
+
+      <div class="reticle" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <i></i>
+        <i></i>
+        <i></i>
+        <i></i>
+      </div>
+
+      <section class="control-bar" aria-label="Simulator controls">
+        <button id="armButton" type="button">DISARM</button>
+        <button id="resetButton" type="button">RESET</button>
+        <button id="levelButton" type="button">LEVEL</button>
+        <button id="mapButton" type="button">PARK</button>
+        <button id="ratesButton" type="button">RATES</button>
+        <button id="inputButton" type="button">INPUT</button>
+        <div class="status" id="status">LIVE</div>
+      </section>
+    </div>
+
+    <div class="video-fx" aria-hidden="true">
+      <span class="video-noise"></span>
+      <span class="video-scanlines"></span>
+      <span class="video-roll"></span>
+      <span class="video-vignette"></span>
+    </div>
+  </main>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
