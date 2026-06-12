@@ -326,7 +326,8 @@ canvas {
 
 .share-panel input,
 .input-panel select,
-.rate-panel select {
+.rate-panel select,
+.physics-panel select {
   flex: 1 1 auto;
   min-width: 0;
   height: 34px;
@@ -460,7 +461,7 @@ canvas {
 
 .physics-panel-header {
   display: grid;
-  grid-template-columns: 1fr 72px;
+  grid-template-columns: 1fr minmax(96px, 142px) 58px 72px;
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
@@ -476,7 +477,8 @@ canvas {
 }
 
 .input-panel select,
-.rate-panel select {
+.rate-panel select,
+.physics-panel select {
   width: 100%;
   appearance: none;
   background-image:
@@ -1087,8 +1089,13 @@ canvas {
     grid-template-columns: 1fr 1fr;
   }
 
+  .physics-panel-header {
+    grid-template-columns: 1fr 58px 72px;
+  }
+
   .input-panel-title,
-  .rate-panel-title {
+  .rate-panel-title,
+  .physics-panel-title {
     display: none;
   }
 
@@ -1098,6 +1105,10 @@ canvas {
 
   .rate-panel-header select {
     grid-column: auto;
+  }
+
+  .physics-panel-header select {
+    grid-column: 1 / 4;
   }
 
   .input-panel button,

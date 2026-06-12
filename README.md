@@ -4,6 +4,8 @@ Browser-based Three.js FPV simulator with local-network multiplayer.
 
 The flight model is currently set up as a BetaFPV Air65 Freestyle with a LAVA 1S 300mAh 75C battery. The physics uses the published 17.3g dry weight, 65mm wheelbase, 0702SE II 23000KV motors, HQ 31mm props, and the 8.3g/300mAh LiHV pack as the baseline. Motor thrust and current are interpolated from the BETAFPV 0702SE II 23000KV 31mm prop 4V load table, including the 32g / 4.19A full-throttle endpoint.
 
+Mass and inertia are calculated from a component layout instead of hand-entered inertia constants. Published component weights are used where practical, with the remaining dry mass allocated to wiring, screws, antenna, solder, and hardware so the model still sums to 17.3g dry / 25.6g all-up. Motor mixing solves a 4x4 matrix from the actual motor positions relative to center of mass, so hover trim accounts for the battery/camera COM offset.
+
 Run from the repository root:
 
 ```sh
@@ -52,12 +54,16 @@ Controls:
 Physics audit:
 
 - Click `PHYS` in the bottom OSD bar.
-- The panel shows Air65 mass/geometry, hover throttle, thrust-to-weight, interpolated motor output/current, pack sag, estimated time remaining, acceleration, and angular rates.
+- The panel shows Air65 mass/geometry, component mass total, center of mass, inertia, hover throttle, thrust-to-weight, interpolated motor output/current, pack sag, estimated time remaining, acceleration, and angular rates.
+- Choose a test and click `RUN` for repeatable `HOVER`, `PUNCH`, `ROLL STEP`, or `YAW STEP` checks.
 - Console diagnostics are available:
 
 ```js
 window.fpvSim.getPhysicsAudit();
 window.fpvSim.getMotorSweep(4.0);
+window.fpvSim.getComponentLayout();
+window.fpvSim.runPhysicsTest("hover");
+window.fpvSim.getPhysicsTest();
 ```
 
 Rates panel:

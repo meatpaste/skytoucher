@@ -37,6 +37,8 @@ const rateDefaultButton = document.querySelector("#rateDefaultButton");
 const rateCloseButton = document.querySelector("#rateCloseButton");
 const physicsPanel = document.querySelector("#physicsPanel");
 const physicsRows = document.querySelector("#physicsRows");
+const physicsTestSelect = document.querySelector("#physicsTestSelect");
+const physicsTestButton = document.querySelector("#physicsTestButton");
 const physicsCloseButton = document.querySelector("#physicsCloseButton");
 
 const DEG = Math.PI / 180;
@@ -173,6 +175,13 @@ const MOUSE_SETTING_DEFS = Object.freeze([
   ["pointerDecay", "LOCK DECAY", 0.4, 7.5, 0.1, 1],
   ["dragDecay", "DRAG DECAY", 0.4, 9.5, 0.1, 1]
 ]);
+const PHYSICS_TESTS = Object.freeze([
+  ["hover", "HOVER"],
+  ["punch", "PUNCH"],
+  ["roll", "ROLL STEP"],
+  ["yaw", "YAW STEP"]
+]);
+const PHYSICS_TEST_VALUES = new Set(PHYSICS_TESTS.map(([value]) => value));
 const AIRCRAFT = createAir65FreestyleConfig();
 const DEFAULT_RATE_PROFILES = Object.freeze(createDefaultRateProfiles(AIRCRAFT));
 let rateProfiles = readRateProfiles();
@@ -183,6 +192,7 @@ let ratePanelOpen = false;
 let ratePanelSignature = "";
 let physicsPanelOpen = false;
 let physicsPanelLastUpdate = 0;
+let physicsTest = createPhysicsTestState();
 let keyCapture = null;
 
 const renderer = new THREE.WebGLRenderer({
@@ -259,6 +269,24 @@ ratesButton.addEventListener("click", () => {
 
 physicsButton.addEventListener("click", () => {
   setPhysicsPanelOpen(!physicsPanelOpen);
+});
+
+physicsTestSelect.addEventListener("change", () => {
+  physicsTest.selected = sanitizePhysicsTestMode(physicsTestSelect.value);
+  if (!physicsTest.running) {
+    physicsTest.result = null;
+  }
+  updatePhysicsPanel(performance.now(), true);
+});
+
+physicsTestButton.addEventListener("click", () => {
+  if (physicsTest.running) {
+    stopPhysicsTest("STOPPED");
+  } else {
+    startPhysicsTest(physicsTest.selected);
+  }
+  updatePhysicsPanel(performance.now(), true);
+  canvas.focus();
 });
 
 physicsCloseButton.addEventListener("click", () => {
@@ -441,6 +469,18 @@ window.fpvSim = {
   getMotorSweep(voltage = AIRCRAFT.battery.nominalVoltage) {
     return getMotorSweep(voltage);
   },
+  getComponentLayout() {
+    return cloneComponentLayout(AIRCRAFT.componentLayout);
+  },
+  runPhysicsTest(mode = physicsTest.selected) {
+    return startPhysicsTest(mode);
+  },
+  stopPhysicsTest() {
+    return stopPhysicsTest("STOPPED");
+  },
+  getPhysicsTest() {
+    return clonePhysicsTestState(physicsTest);
+  },
   getGamepads() {
     return controls.getGamepads();
   },
@@ -539,6 +579,13 @@ function createAir65FreestyleConfig() {
     electronicsCurrentA: 0.24,
     standbyCurrentA: 0.08
   };
+  const componentLayout = createAir65ComponentLayout(armOffsetM, batteryMassKg);
+  const centerOfMassM = calculateCenterOfMass(componentLayout.components);
+  const inertia = calculateComponentInertia(componentLayout.components, centerOfMassM);
+  const motors = createMotorGeometry(armOffsetM, centerOfMassM);
+  const yawTorquePerNewton = 0.0034;
+  const mixerMatrix = createMixerMatrix(motors, yawTorquePerNewton);
+  const mixerInverse = invertMatrix4(mixerMatrix);
   const hoverThrottle = getMotorDriveForThrustAtVoltage(
     (massKg * GRAVITY) / 4,
     battery.nominalVoltage,
@@ -552,6 +599,8 @@ function createAir65FreestyleConfig() {
     massKg,
     wheelbaseM,
     armOffsetM,
+    centerOfMassM,
+    componentLayout,
     propDiameterM: 0.031,
     motorKv: 23000,
     motorCurve,
@@ -560,7 +609,9 @@ function createAir65FreestyleConfig() {
     defaultThrottle: Math.min(0.48, hoverThrottle + 0.018),
     motorIdle: 0.065,
     motorTimeConstant: 0.026,
-    yawTorquePerNewton: 0.0034,
+    yawTorquePerNewton,
+    mixerMatrix,
+    mixerInverse,
     maxRates: {
       pitch: 720 * DEG,
       roll: 720 * DEG,
@@ -588,11 +639,7 @@ function createAir65FreestyleConfig() {
       y: 0.0028,
       z: 0.0072
     },
-    inertia: {
-      x: 6.3e-6,
-      y: 1.18e-5,
-      z: 6.3e-6
-    },
+    inertia,
     linearDrag: {
       x: 0.00125,
       y: 0.0034,
@@ -604,12 +651,7 @@ function createAir65FreestyleConfig() {
       z: 2.1e-5
     },
     battery,
-    motors: [
-      { x: -armOffsetM, z: -armOffsetM, yawSign: 1 },
-      { x: armOffsetM, z: -armOffsetM, yawSign: -1 },
-      { x: -armOffsetM, z: armOffsetM, yawSign: -1 },
-      { x: armOffsetM, z: armOffsetM, yawSign: 1 }
-    ]
+    motors
   };
 }
 
@@ -706,6 +748,157 @@ function getMotorVoltageScale(voltage, curve = AIRCRAFT.motorCurve) {
     0.74,
     1.1
   );
+}
+
+function createAir65ComponentLayout(armOffsetM, batteryMassKg) {
+  const components = [];
+  const motorPositions = [
+    [-armOffsetM, -armOffsetM, "front-left"],
+    [armOffsetM, -armOffsetM, "front-right"],
+    [-armOffsetM, armOffsetM, "rear-left"],
+    [armOffsetM, armOffsetM, "rear-right"]
+  ];
+
+  addComponent(components, "Air65 frame", 2.67, 0, 0, 0, 82, 3, 82, "BETAFPV Air65 frame");
+  addComponent(components, "Air 5IN1 FC", 3.6, 0, 4, 0, 29, 4, 29, "BETAFPV Air brushless flight controller");
+
+  motorPositions.forEach(([x, z, position]) => {
+    addComponent(components, `0702SE II motor ${position}`, 1.45, x * 1000, 5, z * 1000, 7, 9, 7, "BETAFPV 0702SE II 23000KV");
+  });
+
+  motorPositions.forEach(([x, z, position]) => {
+    addComponent(components, `HQ 31mm prop ${position}`, 0.67 / 4, x * 1000, 11, z * 1000, 31, 1, 31, "HQ 31mm prop set estimate");
+  });
+
+  addComponent(components, "C03 camera", 1.45, 0, 16, -20, 14, 14, 12, "BETAFPV C03 camera");
+  addComponent(components, "Air canopy", 0.66, 0, 19, -10, 36, 20, 36, "BETAFPV Air canopy estimate");
+  addComponent(components, "LAVA 1S 300mAh", batteryMassKg * 1000, 0, -14, 3, 11, 6, 61, "BETAFPV LAVA 300mAh");
+  addComponent(components, "BT2.0 pigtail and wires", 0.95, 0, -5, 20, 15, 6, 30, "residual dry mass allocation");
+  addComponent(components, "antenna", 0.35, 0, 12, 28, 3, 3, 50, "residual dry mass allocation");
+  addComponent(components, "screws and solder", 0.75, 0, 2, 0, 45, 5, 45, "residual dry mass allocation");
+  addComponent(components, "adhesive and hardware", 0.4, 0, 1, 0, 35, 4, 35, "residual dry mass allocation");
+
+  return {
+    source: "published component weights plus residual allocation to match 17.3g dry / 25.6g AUW",
+    components
+  };
+}
+
+function addComponent(components, name, massG, xMm, yMm, zMm, widthMm, heightMm, depthMm, source) {
+  components.push({
+    name,
+    massKg: massG / 1000,
+    positionM: {
+      x: xMm / 1000,
+      y: yMm / 1000,
+      z: zMm / 1000
+    },
+    sizeM: {
+      x: widthMm / 1000,
+      y: heightMm / 1000,
+      z: depthMm / 1000
+    },
+    source
+  });
+}
+
+function calculateCenterOfMass(components) {
+  const totalMassKg = components.reduce((sum, component) => sum + component.massKg, 0);
+  if (totalMassKg <= 0) return { x: 0, y: 0, z: 0 };
+
+  return components.reduce((center, component) => {
+    center.x += component.positionM.x * component.massKg / totalMassKg;
+    center.y += component.positionM.y * component.massKg / totalMassKg;
+    center.z += component.positionM.z * component.massKg / totalMassKg;
+    return center;
+  }, { x: 0, y: 0, z: 0 });
+}
+
+function calculateComponentInertia(components, centerOfMassM) {
+  return components.reduce((inertia, component) => {
+    const mass = component.massKg;
+    const size = component.sizeM;
+    const dx = component.positionM.x - centerOfMassM.x;
+    const dy = component.positionM.y - centerOfMassM.y;
+    const dz = component.positionM.z - centerOfMassM.z;
+
+    inertia.x += mass * (size.y ** 2 + size.z ** 2) / 12 + mass * (dy ** 2 + dz ** 2);
+    inertia.y += mass * (size.x ** 2 + size.z ** 2) / 12 + mass * (dx ** 2 + dz ** 2);
+    inertia.z += mass * (size.x ** 2 + size.y ** 2) / 12 + mass * (dx ** 2 + dy ** 2);
+    return inertia;
+  }, { x: 0, y: 0, z: 0 });
+}
+
+function createMotorGeometry(armOffsetM, centerOfMassM) {
+  return [
+    { x: -armOffsetM - centerOfMassM.x, z: -armOffsetM - centerOfMassM.z, yawSign: 1 },
+    { x: armOffsetM - centerOfMassM.x, z: -armOffsetM - centerOfMassM.z, yawSign: -1 },
+    { x: -armOffsetM - centerOfMassM.x, z: armOffsetM - centerOfMassM.z, yawSign: -1 },
+    { x: armOffsetM - centerOfMassM.x, z: armOffsetM - centerOfMassM.z, yawSign: 1 }
+  ];
+}
+
+function createMixerMatrix(motors, yawTorquePerNewton) {
+  return [
+    motors.map(() => 1),
+    motors.map((motor) => -motor.z),
+    motors.map((motor) => motor.yawSign * yawTorquePerNewton),
+    motors.map((motor) => motor.x)
+  ];
+}
+
+function invertMatrix4(matrix) {
+  const size = 4;
+  const augmented = matrix.map((row, rowIndex) => [
+    ...row,
+    ...Array.from({ length: size }, (_, columnIndex) => columnIndex === rowIndex ? 1 : 0)
+  ]);
+
+  for (let column = 0; column < size; column += 1) {
+    let pivotRow = column;
+    for (let row = column + 1; row < size; row += 1) {
+      if (Math.abs(augmented[row][column]) > Math.abs(augmented[pivotRow][column])) {
+        pivotRow = row;
+      }
+    }
+
+    if (Math.abs(augmented[pivotRow][column]) < 1e-9) {
+      throw new Error("Motor mixer matrix is singular");
+    }
+
+    if (pivotRow !== column) {
+      [augmented[column], augmented[pivotRow]] = [augmented[pivotRow], augmented[column]];
+    }
+
+    const pivot = augmented[column][column];
+    for (let col = 0; col < size * 2; col += 1) {
+      augmented[column][col] /= pivot;
+    }
+
+    for (let row = 0; row < size; row += 1) {
+      if (row === column) continue;
+      const factor = augmented[row][column];
+      for (let col = 0; col < size * 2; col += 1) {
+        augmented[row][col] -= factor * augmented[column][col];
+      }
+    }
+  }
+
+  return augmented.map((row) => row.slice(size));
+}
+
+function solveMotorThrusts(collectiveThrustN, requestedTorques, maxThrustPerMotorN) {
+  const target = [
+    collectiveThrustN,
+    requestedTorques.x,
+    requestedTorques.y,
+    requestedTorques.z
+  ];
+
+  return AIRCRAFT.mixerInverse.map((row) => {
+    const thrust = row.reduce((sum, value, index) => sum + value * target[index], 0);
+    return THREE.MathUtils.clamp(thrust, 0, maxThrustPerMotorN);
+  });
 }
 
 function createDefaultRateProfiles(aircraft) {
@@ -1011,8 +1204,204 @@ function setMap(mapId, options = {}) {
   return true;
 }
 
+function createPhysicsTestState() {
+  return {
+    selected: "hover",
+    running: false,
+    mode: "hover",
+    elapsed: 0,
+    duration: 0,
+    samples: [],
+    result: null
+  };
+}
+
+function sanitizePhysicsTestMode(mode) {
+  return PHYSICS_TEST_VALUES.has(mode) ? mode : "hover";
+}
+
+function startPhysicsTest(mode = physicsTest.selected) {
+  const nextMode = sanitizePhysicsTestMode(mode);
+  physicsTest = {
+    selected: nextMode,
+    running: true,
+    mode: nextMode,
+    elapsed: 0,
+    duration: getPhysicsTestDuration(nextMode),
+    samples: [],
+    result: null
+  };
+
+  resetFlight();
+  levelMode = false;
+  flight.armed = true;
+  flight.position.set(0, GROUND_HEIGHT + 5, 42);
+  flight.velocity.set(0, 0, 0);
+  flight.angularVelocity.set(0, 0, 0);
+  flight.throttle = getHoverThrottle();
+  primeMotorsForDrive(flight.throttle);
+  controls.resetTransientAxes();
+  updateButtons();
+  updatePhysicsTestControls();
+  return clonePhysicsTestState(physicsTest);
+}
+
+function stopPhysicsTest(status = "DONE") {
+  if (physicsTest.running || !physicsTest.result) {
+    physicsTest.result = buildPhysicsTestResult(physicsTest, status);
+  }
+  physicsTest.running = false;
+  updatePhysicsTestControls();
+  return clonePhysicsTestState(physicsTest);
+}
+
+function applyPhysicsTestInput(input, dt) {
+  if (!physicsTest.running) return input;
+
+  physicsTest.elapsed += dt;
+  controls.lastSource = "TEST";
+  const hover = getHoverThrottle();
+  const command = {
+    roll: 0,
+    pitch: 0,
+    yaw: 0,
+    throttle: 0,
+    throttleTarget: hover,
+    brake: false
+  };
+
+  if (physicsTest.mode === "punch") {
+    command.throttleTarget = physicsTest.elapsed >= 0.7 && physicsTest.elapsed < 2.05
+      ? 1
+      : hover;
+  } else if (physicsTest.mode === "roll") {
+    command.throttleTarget = Math.min(1, hover + 0.08);
+    command.roll = physicsTest.elapsed >= 0.5 && physicsTest.elapsed < 1.25 ? 1 : 0;
+  } else if (physicsTest.mode === "yaw") {
+    command.throttleTarget = Math.min(1, hover + 0.08);
+    command.yaw = physicsTest.elapsed >= 0.5 && physicsTest.elapsed < 1.25 ? 1 : 0;
+  }
+
+  return command;
+}
+
+function recordPhysicsTestSample() {
+  if (!physicsTest.running) return;
+
+  const altitudeM = Math.max(0, flight.position.y - GROUND_HEIGHT);
+  physicsTest.samples.push({
+    t: physicsTest.elapsed,
+    altitudeM,
+    verticalSpeedMS: flight.velocity.y,
+    speedMS: flight.velocity.length(),
+    verticalAccelerationMS2: flight.acceleration.y,
+    accelerationMS2: flight.acceleration.length(),
+    throttle: flight.throttle,
+    thrustG: newtonsToGramForce(flight.thrustN),
+    currentA: flight.currentA,
+    voltage: flight.batteryVoltage,
+    sag: flight.batterySag,
+    rollDps: flight.angularVelocity.z / DEG,
+    pitchDps: flight.angularVelocity.x / DEG,
+    yawDps: flight.angularVelocity.y / DEG
+  });
+
+  if (physicsTest.elapsed >= physicsTest.duration) {
+    stopPhysicsTest("DONE");
+  }
+}
+
+function getPhysicsTestDuration(mode) {
+  if (mode === "hover") return 4;
+  if (mode === "punch") return 3;
+  return 2.8;
+}
+
+function primeMotorsForDrive(drive) {
+  const maxThrustPerMotor = getVoltageScaledMaxThrust();
+  const collective = sampleMotorAtDrive(drive, flight.batteryVoltage).thrustN * 4;
+  const targetThrusts = solveMotorThrusts(collective, { x: 0, y: 0, z: 0 }, maxThrustPerMotor);
+  targetThrusts.forEach((thrust, index) => {
+    const motorDrive = getMotorDriveForThrustAtVoltage(thrust, flight.batteryVoltage);
+    const sample = sampleMotorAtDrive(motorDrive, flight.batteryVoltage);
+    flight.motorTargets[index] = motorDrive;
+    flight.motorDrives[index] = motorDrive;
+    flight.motorThrusts[index] = sample.thrustN;
+    flight.motorCurrents[index] = sample.currentA;
+  });
+}
+
+function buildPhysicsTestResult(test, status) {
+  const samples = test.samples || [];
+  if (!samples.length) {
+    return {
+      status,
+      mode: test.mode,
+      summary: `${status} / NO SAMPLES`
+    };
+  }
+
+  if (test.mode === "hover") {
+    const tail = samples.filter((sample) => sample.t >= Math.max(0, test.duration - 1.5));
+    const start = samples[0];
+    const end = samples[samples.length - 1];
+    return {
+      status,
+      mode: test.mode,
+      avgVerticalSpeedMS: average(tail.map((sample) => sample.verticalSpeedMS)),
+      altitudeDeltaM: end.altitudeM - start.altitudeM,
+      avgCurrentA: average(tail.map((sample) => sample.currentA)),
+      avgVoltage: average(tail.map((sample) => sample.voltage)),
+      summary: `VSPD ${formatSignedFixed(average(tail.map((sample) => sample.verticalSpeedMS)), 2)}M/S  ALT ${formatSignedFixed(end.altitudeM - start.altitudeM, 2)}M  ${formatFixed(average(tail.map((sample) => sample.currentA)), 2)}A`
+    };
+  }
+
+  if (test.mode === "punch") {
+    const active = samples.filter((sample) => sample.t >= 0.7 && sample.t <= 2.05);
+    const maxVerticalAcceleration = maxOf(active, (sample) => sample.verticalAccelerationMS2);
+    const maxClimbSpeed = maxOf(active, (sample) => sample.verticalSpeedMS);
+    const maxCurrent = maxOf(active, (sample) => sample.currentA);
+    const minVoltage = minOf(active, (sample) => sample.voltage);
+    return {
+      status,
+      mode: test.mode,
+      maxVerticalAccelerationMS2: maxVerticalAcceleration,
+      maxClimbSpeedMS: maxClimbSpeed,
+      maxCurrentA: maxCurrent,
+      minVoltage,
+      summary: `ACC ${formatSignedFixed(maxVerticalAcceleration, 1)}M/S2  CLIMB ${formatFixed(maxClimbSpeed, 1)}M/S  ${formatFixed(maxCurrent, 1)}A ${formatFixed(minVoltage, 2)}V`
+    };
+  }
+
+  const axis = test.mode;
+  const rateKey = axis === "yaw" ? "yawDps" : "rollDps";
+  const active = samples.filter((sample) => sample.t >= 0.5 && sample.t <= 1.25);
+  const tail = samples.filter((sample) => sample.t >= Math.max(0, test.duration - 0.4));
+  const maxRate = maxOf(active, (sample) => Math.abs(sample[rateKey]));
+  const stopRate = average(tail.map((sample) => Math.abs(sample[rateKey])));
+  const targetRate = Math.abs(getRateDegreesPerSecond(axis, 1));
+  return {
+    status,
+    mode: test.mode,
+    maxRateDps: maxRate,
+    targetRateDps: targetRate,
+    stopRateDps: stopRate,
+    summary: `MAX ${formatFixed(maxRate, 0)}DPS / CMD ${formatFixed(targetRate, 0)}DPS  STOP ${formatFixed(stopRate, 0)}DPS`
+  };
+}
+
+function maxOf(values, mapper) {
+  if (!values.length) return 0;
+  return values.reduce((max, value) => Math.max(max, mapper(value)), -Infinity);
+}
+
+function minOf(values, mapper) {
+  if (!values.length) return 0;
+  return values.reduce((min, value) => Math.min(min, mapper(value)), Infinity);
+}
+
 function updateFlight(dt) {
-  const input = controls.sample(dt);
+  const input = applyPhysicsTestInput(controls.sample(dt), dt);
   syncEulerFromQuaternion(flight);
   updateThrottle(input, dt);
 
@@ -1052,6 +1441,7 @@ function updateFlight(dt) {
   resolveGround(dt);
   resolveBounds();
   syncEulerFromQuaternion(flight);
+  recordPhysicsTestSample();
 }
 
 function updateThrottle(input, dt) {
@@ -1139,22 +1529,16 @@ function calculateControlTorques(rateTargets, output, dt) {
 function updateMotors(requestedTorques, dt) {
   const maxThrustPerMotor = getVoltageScaledMaxThrust();
   const baseDrive = flight.armed ? THREE.MathUtils.clamp(flight.throttle, AIRCRAFT.motorIdle, 1) : 0;
-  const baseThrust = sampleMotorAtDrive(baseDrive, flight.batteryVoltage).thrustN;
-  const pitchDelta = requestedTorques.x / (4 * AIRCRAFT.armOffsetM);
-  const rollDelta = requestedTorques.z / (4 * AIRCRAFT.armOffsetM);
-  const yawDelta = requestedTorques.y / (4 * AIRCRAFT.yawTorquePerNewton);
+  const collective = sampleMotorAtDrive(baseDrive, flight.batteryVoltage).thrustN * 4;
+  const targetThrusts = flight.armed
+    ? solveMotorThrusts(collective, requestedTorques, maxThrustPerMotor)
+    : [0, 0, 0, 0];
   const motorLerp = 1 - Math.exp(-dt / AIRCRAFT.motorTimeConstant);
 
-  AIRCRAFT.motors.forEach((motor, index) => {
-    let targetThrust = baseThrust;
-    targetThrust += -Math.sign(motor.z) * pitchDelta;
-    targetThrust += Math.sign(motor.x) * rollDelta;
-    targetThrust += motor.yawSign * yawDelta;
-    targetThrust = THREE.MathUtils.clamp(targetThrust, 0, maxThrustPerMotor);
-
+  AIRCRAFT.motors.forEach((_, index) => {
     const idle = flight.armed ? AIRCRAFT.motorIdle : 0;
     const targetDrive = maxThrustPerMotor > 0
-      ? THREE.MathUtils.clamp(getMotorDriveForThrustAtVoltage(targetThrust, flight.batteryVoltage), idle, 1)
+      ? THREE.MathUtils.clamp(getMotorDriveForThrustAtVoltage(targetThrusts[index], flight.batteryVoltage), idle, 1)
       : 0;
 
     flight.motorTargets[index] = targetDrive;
@@ -1364,6 +1748,8 @@ function getPhysicsAudit() {
   const altitudeM = Math.max(0, flight.position.y - GROUND_HEIGHT);
   const speed = flight.velocity.length();
   const usedMah = (1 - flight.batterySoc) * AIRCRAFT.battery.capacityAh * 1000;
+  const componentMassKg = AIRCRAFT.componentLayout.components.reduce((sum, component) => sum + component.massKg, 0);
+  const dryComponentMassKg = componentMassKg - AIRCRAFT.battery.massKg;
   const maxThrustN = getVoltageScaledMaxThrust() * 4;
   const thrustToWeight = maxThrustN / Math.max(0.001, AIRCRAFT.massKg * GRAVITY);
   const avgMotorDrive = average(flight.motorDrives);
@@ -1383,8 +1769,16 @@ function getPhysicsAudit() {
     dryMassG: AIRCRAFT.dryMassKg * 1000,
     batteryMassG: AIRCRAFT.battery.massKg * 1000,
     allUpMassG: AIRCRAFT.massKg * 1000,
+    componentMassG: componentMassKg * 1000,
+    dryComponentMassG: dryComponentMassKg * 1000,
+    componentSource: AIRCRAFT.componentLayout.source,
     wheelbaseMm: AIRCRAFT.wheelbaseM * 1000,
     propMm: AIRCRAFT.propDiameterM * 1000,
+    centerOfMassMm: {
+      x: AIRCRAFT.centerOfMassM.x * 1000,
+      y: AIRCRAFT.centerOfMassM.y * 1000,
+      z: AIRCRAFT.centerOfMassM.z * 1000
+    },
     altitudeM,
     speedMS: speed,
     accelerationMS2: flight.acceleration.length(),
@@ -1434,13 +1828,20 @@ function updatePhysicsPanel(now = performance.now(), force = false) {
   if (!force && now - physicsPanelLastUpdate < 120) return;
   physicsPanelLastUpdate = now;
 
+  renderPhysicsTestSelect();
+  updatePhysicsTestControls();
   const audit = getPhysicsAudit();
   physicsRows.replaceChildren(
+    createPhysicsRow("TEST", getPhysicsTestLabel()),
+    createPhysicsRow("RESULT", physicsTest.result?.summary || "NO RESULT"),
     createPhysicsRow("MODEL", audit.model),
     createPhysicsRow("MOTOR", audit.motor),
     createPhysicsRow("SOURCE", audit.motorSource),
     createPhysicsRow("MASS", `${formatFixed(audit.allUpMassG, 1)}G AUW (${formatFixed(audit.dryMassG, 1)}G + ${formatFixed(audit.batteryMassG, 1)}G)`),
+    createPhysicsRow("MASS MODEL", `${formatFixed(audit.componentMassG, 1)}G COMPONENTS / ${formatFixed(audit.dryComponentMassG, 1)}G DRY`),
     createPhysicsRow("GEOMETRY", `${formatFixed(audit.wheelbaseMm, 0)}MM WB / ${formatFixed(audit.propMm, 0)}MM PROP`),
+    createPhysicsRow("COM", `X${formatSignedFixed(audit.centerOfMassMm.x, 1)} Y${formatSignedFixed(audit.centerOfMassMm.y, 1)} Z${formatSignedFixed(audit.centerOfMassMm.z, 1)}MM`),
+    createPhysicsRow("INERTIA", `P ${formatExp(audit.inertia.x)}  Y ${formatExp(audit.inertia.y)}  R ${formatExp(audit.inertia.z)}`),
     createPhysicsRow("THROTTLE", `${formatPercent(audit.throttle)} CMD / ${formatPercent(audit.hoverThrottle)} HOVER`, getHoverClass(audit)),
     createPhysicsRow("THRUST", `${formatFixed(audit.thrustG, 1)}G NOW / ${formatFixed(audit.maxThrustG, 0)}G MAX`, audit.thrustToWeight < 3.5 ? "is-warning" : "is-good"),
     createPhysicsRow("T/W", `${formatFixed(audit.thrustToWeight, 2)}:1`, audit.thrustToWeight < 3.5 ? "is-warning" : "is-good"),
@@ -1455,6 +1856,34 @@ function updatePhysicsPanel(now = performance.now(), force = false) {
     createPhysicsRow("ACCEL", `${formatFixed(audit.verticalAccelerationMS2, 1)}M/S2 VERT / ${formatFixed(audit.accelerationMS2, 1)}M/S2 NET`),
     createPhysicsRow("RATES", `R${formatSignedFixed(audit.ratesDps.roll, 0)} P${formatSignedFixed(audit.ratesDps.pitch, 0)} Y${formatSignedFixed(audit.ratesDps.yaw, 0)} DPS`)
   );
+}
+
+function renderPhysicsTestSelect() {
+  const signature = PHYSICS_TESTS.map(([value, label]) => `${value}:${label}`).join("|");
+  if (physicsTestSelect.dataset.signature !== signature) {
+    physicsTestSelect.dataset.signature = signature;
+    physicsTestSelect.textContent = "";
+    PHYSICS_TESTS.forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      physicsTestSelect.append(option);
+    });
+  }
+  physicsTestSelect.value = physicsTest.selected;
+  physicsTestSelect.disabled = physicsTest.running;
+}
+
+function updatePhysicsTestControls() {
+  physicsTestButton.textContent = physicsTest.running ? "STOP" : "RUN";
+  physicsTestSelect.value = physicsTest.selected;
+  physicsTestSelect.disabled = physicsTest.running;
+}
+
+function getPhysicsTestLabel() {
+  const label = PHYSICS_TESTS.find(([value]) => value === physicsTest.selected)?.[1] || "HOVER";
+  if (!physicsTest.running) return `${label} READY`;
+  return `${label} ${formatFixed(physicsTest.elapsed, 1)}/${formatFixed(physicsTest.duration, 1)}S`;
 }
 
 function createPhysicsRow(labelText, valueText, valueClass = "") {
@@ -1487,6 +1916,10 @@ function formatFixed(value, precision) {
   return Number(value).toFixed(precision);
 }
 
+function formatExp(value) {
+  return Number(value).toExponential(2);
+}
+
 function formatSignedFixed(value, precision) {
   const fixed = Number(value).toFixed(precision);
   return `${value >= 0 ? "+" : ""}${fixed}`;
@@ -1495,6 +1928,34 @@ function formatSignedFixed(value, precision) {
 function average(values) {
   if (!values.length) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function cloneComponentLayout(layout) {
+  return {
+    source: layout.source,
+    components: layout.components.map((component) => ({
+      name: component.name,
+      massKg: component.massKg,
+      positionM: { ...component.positionM },
+      sizeM: { ...component.sizeM },
+      source: component.source
+    })),
+    centerOfMassM: { ...AIRCRAFT.centerOfMassM },
+    inertia: { ...AIRCRAFT.inertia }
+  };
+}
+
+function clonePhysicsTestState(test) {
+  return {
+    selected: test.selected,
+    running: test.running,
+    mode: test.mode,
+    elapsed: test.elapsed,
+    duration: test.duration,
+    result: test.result ? { ...test.result } : null,
+    sampleCount: test.samples.length,
+    latestSample: test.samples.length ? { ...test.samples[test.samples.length - 1] } : null
+  };
 }
 
 function updateButtons() {
