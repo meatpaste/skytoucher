@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 
-// The formula under test (copy from design spec, NOT yet in app.js)
+// Formula mirrored from getGroundEffectMultiplier() in app.js — must be kept in sync
 function groundEffectMultiplier(height, propDiameterM) {
   const R = propDiameterM / 2;
   return 1 + 0.2 * Math.exp(-0.8 * height / R);
