@@ -1649,10 +1649,8 @@ function getHoverThrottle() {
 
 function getGroundEffectMultiplier() {
   const height = Math.max(0, flight.position.y - GROUND_HEIGHT);
-  const effectHeight = AIRCRAFT.propDiameterM * 2.1;
-  if (height >= effectHeight) return 1;
-  const t = 1 - height / effectHeight;
-  return 1 + 0.16 * t * t;
+  const R = AIRCRAFT.propDiameterM / 2;
+  return 1 + 0.2 * Math.exp(-0.8 * height / R);
 }
 
 function syncEulerFromQuaternion(state) {
