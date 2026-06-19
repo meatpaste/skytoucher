@@ -139,6 +139,26 @@ const DEFAULT_GAMEPAD_MAPPING = Object.freeze({
   }),
   buttons: Object.freeze({})
 });
+const DEFAULT_USB_GAMEPAD_MAPPING = Object.freeze({
+  axes: Object.freeze({
+    0: Object.freeze({ action: "roll", invert: false }),
+    1: Object.freeze({ action: "pitch", invert: true }),
+    2: Object.freeze({ action: "yaw", invert: false }),
+    3: Object.freeze({ action: "throttle", invert: false })
+  }),
+  buttons: Object.freeze({})
+});
+const DEFAULT_RADIO_GAMEPAD_MAPPING = Object.freeze({
+  axes: Object.freeze({
+    0: Object.freeze({ action: "roll", invert: false }),
+    1: Object.freeze({ action: "pitch", invert: true }),
+    2: Object.freeze({ action: "throttle", invert: false }),
+    3: Object.freeze({ action: "yaw", invert: false }),
+    4: Object.freeze({ action: "arm", invert: false }),
+    5: Object.freeze({ action: "level", invert: false })
+  }),
+  buttons: Object.freeze({})
+});
 const DEFAULT_KEYBOARD_MOUSE_MAPPING = Object.freeze({
   mouse: Object.freeze({
     x: Object.freeze({ action: "roll", invert: false }),
@@ -342,8 +362,11 @@ inputCloseButton.addEventListener("click", () => {
 });
 
 inputDefaultButton.addEventListener("click", () => {
-  if (controls.getActiveInputDevice().kind === "keyboard") {
+  const active = controls.getActiveInputDevice();
+  if (active.kind === "keyboard") {
     controls.resetKeyboardMouseMapping();
+  } else if (isPreferredRadioGamepad(active.gamepad) || isUsableRadioGamepad(active.gamepad)) {
+    controls.setGamepadMapping(cloneGamepadMapping(DEFAULT_RADIO_GAMEPAD_MAPPING));
   } else {
     controls.resetGamepadMapping();
   }
@@ -2265,8 +2288,11 @@ function renderGamepadRows(gamepad, mapping) {
     return;
   }
 
+  const isRadio = isPreferredRadioGamepad(gamepad) || isUsableRadioGamepad(gamepad);
+
   gamepad.axes.forEach((value, index) => {
-    inputRows.append(createGamepadInputRow("axis", index, value, getGamepadBinding(mapping, "axis", index)));
+    const label = isRadio ? getGamepadAxisLabel(gamepad, index) : null;
+    inputRows.append(createGamepadInputRow("axis", index, value, getGamepadBinding(mapping, "axis", index), label));
   });
 
   gamepad.buttons.forEach((value, index) => {
@@ -2299,7 +2325,7 @@ function createInputSection(title) {
   return section;
 }
 
-function createGamepadInputRow(type, index, value, binding) {
+function createGamepadInputRow(type, index, value, binding, labelText) {
   const row = document.createElement("div");
   row.className = "input-row";
   row.dataset.type = type;
@@ -2307,7 +2333,7 @@ function createGamepadInputRow(type, index, value, binding) {
 
   const label = document.createElement("div");
   label.className = "input-row-label";
-  label.textContent = `${type === "axis" ? "AXIS" : "BTN"} ${index}`;
+  label.textContent = labelText || `${type === "axis" ? "AXIS" : "BTN"} ${index}`;
   row.append(label);
 
   const meter = document.createElement("div");
@@ -3564,11 +3590,19 @@ class ControlMixer {
   }
 
   onGamepadConnected(gamepad) {
-    if (!isUsableRadioGamepad(gamepad)) return;
+    if (!isMappableGamepad(gamepad)) return;
     if (!this.isKeyboardMouseInputSelected()) {
       this.gamepad.index = gamepad.index;
       this.gamepad.name = gamepad.id || "Gamepad";
       this.gamepad.lastSeen = performance.now();
+    }
+    if (!hasCustomGamepadMapping()) {
+      if (isPreferredRadioGamepad(gamepad)) {
+        this.gamepad.mapping = cloneGamepadMapping(DEFAULT_RADIO_GAMEPAD_MAPPING);
+      } else {
+        this.gamepad.mapping = cloneGamepadMapping(DEFAULT_USB_GAMEPAD_MAPPING);
+      }
+      localStorage.setItem(GAMEPAD_STORAGE_KEY, JSON.stringify(this.gamepad.mapping));
     }
   }
 
@@ -4309,6 +4343,17 @@ function getGamepadSourceLabel(gamepad) {
   return isPreferredRadioGamepad(gamepad) ? "ELRS" : "PAD";
 }
 
+function getGamepadAxisLabel(gamepad, index) {
+  if (isPreferredRadioGamepad(gamepad) || isUsableRadioGamepad(gamepad)) {
+    if (index < 4) {
+      const names = ["CH1 ROLL", "CH2 PITCH", "CH3 THROTTLE", "CH4 YAW"];
+      return names[index];
+    }
+    return `CH${index + 1}`;
+  }
+  return `AXIS ${index}`;
+}
+
 function normalizeGamepadCenteredAxis(value, invert = false) {
   const signed = (invert ? -value : value);
   const clamped = THREE.MathUtils.clamp(signed, -1, 1);
@@ -4482,6 +4527,10 @@ function applyInputAction(actions, action, values) {
   } else if (action === "reset") {
     actions.reset = values.active;
   }
+}
+
+function hasCustomGamepadMapping() {
+  return localStorage.getItem(GAMEPAD_STORAGE_KEY) !== null;
 }
 
 function readGamepadMapping() {
