@@ -407,6 +407,7 @@ canvas {
   pointer-events: auto;
 }
 
+.share-panel.is-hidden,
 .input-panel.is-hidden,
 .rate-panel.is-hidden,
 .physics-panel.is-hidden {

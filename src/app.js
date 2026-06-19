@@ -19,6 +19,7 @@ const mapButton = document.querySelector("#mapButton");
 const ratesButton = document.querySelector("#ratesButton");
 const physicsButton = document.querySelector("#physicsButton");
 const inputButton = document.querySelector("#inputButton");
+const sharePanel = document.querySelector(".share-panel");
 const shareUrlInput = document.querySelector("#shareUrl");
 const shareCopyButton = document.querySelector("#shareCopyButton");
 const inputPanel = document.querySelector("#inputPanel");
@@ -4092,6 +4093,7 @@ class MultiplayerClient {
     this.shareUrl = url;
     shareUrlInput.value = url || "LAN link unavailable";
     shareCopyButton.disabled = !url;
+    sharePanel.classList.toggle("is-hidden", !url);
   }
 
   async copyShareUrl() {
