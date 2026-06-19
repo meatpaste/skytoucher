@@ -51,10 +51,12 @@ const tmpVec2 = new THREE.Vector3();
 const tmpVec3 = new THREE.Vector3();
 const tmpVec4 = new THREE.Vector3();
 const tmpVec5 = new THREE.Vector3();
+const tmpWorldPos = new THREE.Vector3();
 const tmpQuat = new THREE.Quaternion();
 const tmpEuler = new THREE.Euler(0, 0, 0, "YXZ");
 const GRAVITY = 9.80665;
 const GROUND_HEIGHT = 0.72;
+const DRONE_RADIUS = 0.08;
 const RENDER_CONFIG = {
   maxPixelRatio: readNumberSetting("fpv-max-dpr", 1.25, 0.75, 2),
   shadows: localStorage.getItem("fpv-shadows") === "1"
@@ -550,13 +552,14 @@ function loop(now) {
   previousTime = now;
   accumulator += frameDt;
 
+  animateWorld(now);
+
   while (accumulator >= fixedDt) {
     updateFlight(fixedDt);
     accumulator -= fixedDt;
   }
 
   updateCamera();
-  animateWorld(now);
   multiplayer.update(flight, now, frameDt);
   updateHud();
   updateInputPanel(false);
@@ -1462,6 +1465,7 @@ function updateFlight(dt) {
   flight.pitchRate = flight.angularVelocity.x;
   flight.rollRate = flight.angularVelocity.z;
 
+  resolveCollisions();
   resolveGround(dt);
   resolveBounds();
   syncEulerFromQuaternion(flight);
@@ -1721,6 +1725,115 @@ function resolveBounds() {
   if (Math.abs(flight.position.z) > limit) {
     flight.position.z = Math.sign(flight.position.z) * limit;
     flight.velocity.z *= -0.25;
+  }
+}
+
+function registerBoxVolume(objects, mesh) {
+  mesh.updateWorldMatrix(true, false);
+  const box = new THREE.Box3().setFromObject(mesh);
+  objects.collisionVolumes.push({
+    type: "box",
+    minX: box.min.x, minY: box.min.y, minZ: box.min.z,
+    maxX: box.max.x, maxY: box.max.y, maxZ: box.max.z
+  });
+}
+
+function resolveCollisions() {
+  if (!flight.armed || !world) return;
+  const pos = flight.position;
+  const vel = flight.velocity;
+  const vols = world.collisionVolumes;
+  const r = DRONE_RADIUS;
+  const restitution = 0.3;
+  for (let i = 0; i < vols.length; i += 1) {
+    const v = vols[i];
+    let nx = 0, ny = 0, nz = 0, pen = 0;
+    let hit = false;
+    if (v.type === "box") {
+      if (pos.x >= v.minX - r && pos.x <= v.maxX + r
+       && pos.y >= v.minY - r && pos.y <= v.maxY + r
+       && pos.z >= v.minZ - r && pos.z <= v.maxZ + r) {
+        hit = true;
+        const rightPen = (v.maxX + r) - pos.x;
+        const leftPen = pos.x - (v.minX - r);
+        const upPen = (v.maxY + r) - pos.y;
+        const downPen = pos.y - (v.minY - r);
+        const backPen = (v.maxZ + r) - pos.z;
+        const frontPen = pos.z - (v.minZ - r);
+        const pairs = [
+          [leftPen, -1, 0, 0], [rightPen, 1, 0, 0],
+          [downPen, 0, -1, 0], [upPen, 0, 1, 0],
+          [frontPen, 0, 0, -1], [backPen, 0, 0, 1]
+        ];
+        let minI = 0;
+        for (let j = 1; j < 6; j += 1) {
+          if (pairs[j][0] < pairs[minI][0]) minI = j;
+        }
+        nx = pairs[minI][1]; ny = pairs[minI][2]; nz = pairs[minI][3];
+        pen = pairs[minI][0];
+      }
+    } else if (v.type === "sphere") {
+      const dx = pos.x - v.cx;
+      const dy = pos.y - v.cy;
+      const dz = pos.z - v.cz;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const threshold = v.radius + r;
+      if (dist < threshold) {
+        hit = true;
+        pen = threshold - dist;
+        if (dist > 0.001) {
+          nx = dx / dist;
+          ny = dy / dist;
+          nz = dz / dist;
+        } else {
+          ny = 1;
+        }
+      }
+    } else if (v.type === "torus") {
+      const dx = pos.x - v.cx;
+      const dy = pos.y - v.cy;
+      const dz = pos.z - v.cz;
+      const along = dx * v.ax + dy * v.ay + dz * v.az;
+      const pdx = dx - along * v.ax;
+      const pdy = dy - along * v.ay;
+      const pdz = dz - along * v.az;
+      const planarDist = Math.sqrt(pdx * pdx + pdy * pdy + pdz * pdz);
+      const ringDist = planarDist - v.majorR;
+      const distFromTube = Math.sqrt(ringDist * ringDist + along * along);
+      const threshold = v.minorR + r;
+      if (distFromTube < threshold) {
+        hit = true;
+        pen = threshold - distFromTube;
+        if (planarDist > 0.001) {
+          nx = (pdx / planarDist) * (ringDist / Math.max(0.001, distFromTube));
+          ny = (pdy / planarDist) * (ringDist / Math.max(0.001, distFromTube));
+          nz = (pdz / planarDist) * (ringDist / Math.max(0.001, distFromTube));
+          nx += v.ax * (along / Math.max(0.001, distFromTube));
+          ny += v.ay * (along / Math.max(0.001, distFromTube));
+          nz += v.az * (along / Math.max(0.001, distFromTube));
+          const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+          if (len > 0.001) { nx /= len; ny /= len; nz /= len; }
+        } else {
+          ny = 1;
+        }
+      }
+    }
+    if (hit) {
+      flight.armed = false;
+      pos.x += nx * pen;
+      pos.y += ny * pen;
+      pos.z += nz * pen;
+      const vDotN = vel.x * nx + vel.y * ny + vel.z * nz;
+      if (vDotN < 0) {
+        vel.x -= (1 + restitution) * vDotN * nx;
+        vel.y -= (1 + restitution) * vDotN * ny;
+        vel.z -= (1 + restitution) * vDotN * nz;
+      }
+      const impactSpeed = Math.abs(vDotN);
+      flight.angularVelocity.x += (ny * 2 + Math.random() * 0.5) * Math.min(impactSpeed, 8);
+      flight.angularVelocity.z += (nx * 2 + Math.random() * 0.5) * Math.min(impactSpeed, 8);
+      return;
+    }
   }
 }
 
@@ -2659,7 +2772,8 @@ function buildWorld(mapId = "airfield") {
     flags: [],
     clouds: [],
     rides: [],
-    blinkers: []
+    blinkers: [],
+    collisionVolumes: []
   };
 
   if (mapId === "fairground") {
@@ -2819,10 +2933,16 @@ function addFairgroundGates(objects) {
       roughness: 0.32,
       metalness: 0.08
     });
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(index === 2 ? 7.4 : 5.4, 0.22, 14, 72), material);
+    const majorR = index === 2 ? 7.4 : 5.4;
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(majorR, 0.22, 14, 72), material);
     ring.castShadow = true;
     group.add(ring);
     objects.gateRings.push(ring);
+
+    objects.collisionVolumes.push({
+      type: "torus", cx: gate.x, cy: gate.y, cz: gate.z,
+      ax: 0, ay: 1, az: 0, majorR, minorR: 0.22
+    });
 
     const baseMat = new THREE.MeshStandardMaterial({ color: 0x1b2227, roughness: 0.44 });
     [-5.2, 5.2].forEach((x) => {
@@ -2831,6 +2951,7 @@ function addFairgroundGates(objects) {
       pole.castShadow = true;
       pole.receiveShadow = true;
       group.add(pole);
+      registerBoxVolume(objects, pole);
     });
 
     const lamp = new THREE.PointLight(gate.color, 16, 24, 2.2);
@@ -2888,6 +3009,10 @@ function addFerrisWheel(objects) {
     cabin.position.set(Math.cos(angle) * 18, Math.sin(angle) * 18, 0);
     cabin.castShadow = true;
     wheel.add(cabin);
+    objects.collisionVolumes.push({
+      type: "sphere", cx: 0, cy: 0, cz: 0, radius: 2.2,
+      node: cabin
+    });
   }
 
   const hub = new THREE.Mesh(new THREE.SphereGeometry(1.5, 20, 14), accentMat);
@@ -2902,6 +3027,7 @@ function addFerrisWheel(objects) {
     support.castShadow = true;
     support.receiveShadow = true;
     group.add(support);
+    registerBoxVolume(objects, support);
   });
 
   const platform = new THREE.Mesh(new THREE.BoxGeometry(30, 1.1, 8), supportMat);
@@ -2909,6 +3035,7 @@ function addFerrisWheel(objects) {
   platform.castShadow = true;
   platform.receiveShadow = true;
   group.add(platform);
+  registerBoxVolume(objects, platform);
 
   objects.rides.push({ type: "wheel", node: wheel, speed: 0.16 });
 }
@@ -2927,6 +3054,7 @@ function addCarousel(objects) {
   base.castShadow = true;
   base.receiveShadow = true;
   group.add(base);
+  registerBoxVolume(objects, base);
 
   const spinner = new THREE.Group();
   spinner.position.y = 0.65;
@@ -2955,6 +3083,10 @@ function addCarousel(objects) {
     horse.rotation.y = -angle + Math.PI / 2;
     horse.castShadow = true;
     spinner.add(horse);
+    objects.collisionVolumes.push({
+      type: "sphere", cx: 0, cy: 0, cz: 0, radius: 1.2,
+      node: horse
+    });
   }
 
   const light = new THREE.PointLight(0xffcb66, 18, 28, 2.1);
@@ -2986,6 +3118,7 @@ function addCoaster(objects) {
     );
     rail.castShadow = true;
     objects.root.add(rail);
+    registerBoxVolume(objects, rail);
   });
 
   points.forEach((point, index) => {
@@ -2994,12 +3127,14 @@ function addCoaster(objects) {
     support.castShadow = true;
     support.receiveShadow = true;
     objects.root.add(support);
+    registerBoxVolume(objects, support);
 
     if (index < points.length - 1) {
       const tie = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.14, 0.22), supportMat);
       tie.position.copy(point);
       tie.castShadow = true;
       objects.root.add(tie);
+      registerBoxVolume(objects, tie);
     }
   });
 }
@@ -3015,12 +3150,17 @@ function addDropTower(objects) {
   tower.position.y = 21;
   tower.castShadow = true;
   group.add(tower);
+  registerBoxVolume(objects, tower);
 
   const ring = new THREE.Mesh(new THREE.TorusGeometry(4.4, 0.18, 10, 36), carMat);
   ring.position.y = 17;
   ring.rotation.x = Math.PI / 2;
   ring.castShadow = true;
   group.add(ring);
+  objects.collisionVolumes.push({
+    type: "sphere", cx: 0, cy: 0, cz: 0, radius: 4.6,
+    node: ring
+  });
 
   const beacon = new THREE.PointLight(0xff8f4a, 18, 30, 2);
   beacon.position.set(0, 40, 0);
@@ -3052,6 +3192,7 @@ function addFairgroundStalls(objects) {
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
+    registerBoxVolume(objects, body);
 
     const canopy = new THREE.Mesh(
       new THREE.ConeGeometry(7.2, 3.4, 4),
@@ -3066,11 +3207,13 @@ function addFairgroundStalls(objects) {
     canopy.rotation.y = Math.PI / 4;
     canopy.castShadow = true;
     group.add(canopy);
+    registerBoxVolume(objects, canopy);
 
     const counter = new THREE.Mesh(new THREE.BoxGeometry(9.8, 1, 1.2), darkMat);
     counter.position.set(0, 2.1, -4.1);
     counter.castShadow = true;
     group.add(counter);
+    registerBoxVolume(objects, counter);
   });
 
   addTent(objects, -116, -96, 0xff5c93, 0xf7f1e1);
@@ -3088,6 +3231,7 @@ function addTent(objects, x, z, colorA, colorB) {
   body.castShadow = true;
   body.receiveShadow = true;
   objects.root.add(body);
+  registerBoxVolume(objects, body);
 
   const roof = new THREE.Mesh(
     new THREE.ConeGeometry(15.5, 10, 32),
@@ -3096,6 +3240,7 @@ function addTent(objects, x, z, colorA, colorB) {
   roof.position.set(x, 13, z);
   roof.castShadow = true;
   objects.root.add(roof);
+  registerBoxVolume(objects, roof);
 }
 
 function addBalloonCluster(objects, x, z, phase) {
@@ -3108,6 +3253,11 @@ function addBalloonCluster(objects, x, z, phase) {
     balloon.position.set(x + Math.cos(index) * 1.5, 8.2 + (index % 3) * 0.9, z + Math.sin(index) * 1.5);
     balloon.castShadow = true;
     objects.root.add(balloon);
+
+    objects.collisionVolumes.push({
+      type: "sphere", cx: 0, cy: 0, cz: 0, radius: 1.05,
+      node: balloon
+    });
 
     const string = new THREE.Mesh(
       new THREE.CylinderGeometry(0.02, 0.02, 5.8, 5),
@@ -3247,6 +3397,11 @@ function addGates(objects) {
     group.add(ring);
     objects.gateRings.push(ring);
 
+    objects.collisionVolumes.push({
+      type: "torus", cx: gate.x, cy: gate.y, cz: gate.z,
+      ax: 0, ay: 1, az: 0, majorR: 5.35, minorR: 0.2
+    });
+
     const poleMaterial = new THREE.MeshStandardMaterial({ color: 0xe7eef4, roughness: 0.48 });
     [-5.15, 5.15].forEach((x) => {
       const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.18, gate.y * 2, 12), poleMaterial);
@@ -3254,6 +3409,7 @@ function addGates(objects) {
       pole.castShadow = true;
       pole.receiveShadow = true;
       group.add(pole);
+      registerBoxVolume(objects, pole);
     });
 
     const marker = new THREE.Mesh(
@@ -3263,6 +3419,7 @@ function addGates(objects) {
     marker.position.set(0, -gate.y + 0.08, 0);
     marker.rotation.x = -Math.PI / 2;
     group.add(marker);
+    registerBoxVolume(objects, marker);
 
     if (index === 0) {
       const starter = new THREE.PointLight(gate.color, 35, 28, 2.3);
@@ -3289,6 +3446,7 @@ function addCourseMarkers(objects) {
     cone.castShadow = true;
     cone.receiveShadow = true;
     objects.root.add(cone);
+    registerBoxVolume(objects, cone);
   }
 }
 
@@ -3307,11 +3465,13 @@ function addBuildings(objects) {
     base.castShadow = true;
     base.receiveShadow = true;
     objects.root.add(base);
+    registerBoxVolume(objects, base);
 
     const roofMesh = new THREE.Mesh(new THREE.BoxGeometry(w + 1.4, 1.2, d + 1.4), roof);
     roofMesh.position.set(x, h + 0.8, z);
     roofMesh.castShadow = true;
     objects.root.add(roofMesh);
+    registerBoxVolume(objects, roofMesh);
   });
 
   const towerMat = new THREE.MeshStandardMaterial({ color: 0xd7e1e7, roughness: 0.5, metalness: 0.12 });
@@ -3320,6 +3480,7 @@ function addBuildings(objects) {
   tower.castShadow = true;
   tower.receiveShadow = true;
   objects.root.add(tower);
+  registerBoxVolume(objects, tower);
 
   const beacon = new THREE.Mesh(
     new THREE.SphereGeometry(1.4, 18, 12),
@@ -3327,6 +3488,9 @@ function addBuildings(objects) {
   );
   beacon.position.set(28, 29.2, -122);
   objects.root.add(beacon);
+  objects.collisionVolumes.push({
+    type: "sphere", cx: 28, cy: 29.2, cz: -122, radius: 1.4
+  });
 }
 
 function addTrees(objects) {
@@ -3365,6 +3529,7 @@ function addTrees(objects) {
     leaves.castShadow = true;
     leaves.receiveShadow = true;
     objects.root.add(leaves);
+    registerBoxVolume(objects, leaves);
   }
 }
 
@@ -3429,6 +3594,17 @@ function animateWorld(now) {
       cloud.position.x = -360;
     }
   });
+
+  const vols = world.collisionVolumes;
+  for (let i = 0; i < vols.length; i += 1) {
+    const v = vols[i];
+    if (v.node) {
+      v.node.getWorldPosition(tmpWorldPos);
+      v.cx = tmpWorldPos.x;
+      v.cy = tmpWorldPos.y;
+      v.cz = tmpWorldPos.z;
+    }
+  }
 }
 
 class ControlMixer {
